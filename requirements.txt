@@ -1,0 +1,22 @@
+# Core
+numpy
+wandb
+hydra-core
+omegaconf
+
+# Evaluation
+lpips
+clean-fid
+torchmetrics
+
+# DeepMind Lab (via Shimmy)
+# shimmy[dm-lab]  # uncomment when dm_lab is installed
+# dm_env
+
+# Data processing
+Pillow
+imageio
+imageio-ffmpeg
+
+# Visualization
+matplotlib

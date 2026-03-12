@@ -1,0 +1,13 @@
+.env
+.venv/
+*.pt
+*.safetensors
+*.bin
+*.ckpt
+__pycache__/
+*.pyc
+wandb/
+.cache/
+*.tar.gz
+data/
+experiments/
