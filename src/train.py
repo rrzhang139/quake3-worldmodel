@@ -65,6 +65,8 @@ def train(args):
         img_size=args.res,
         num_context_frames=args.num_context,
         model_size=args.model_size,
+        cfg_drop_prob=args.cfg_drop_prob,
+        action_aux_weight=args.action_aux_weight,
     ).to(device)
     params = sum(p.numel() for p in model.parameters())
     print(f"Model: {args.model_size} ({params:,} params)")
@@ -208,6 +210,10 @@ def main():
     parser.add_argument("--lr", type=float, default=1e-4)
     parser.add_argument("--noise_aug", type=float, default=0.0,
                         help="GameNGen context noise augmentation sigma")
+    parser.add_argument("--cfg_drop_prob", type=float, default=0.0,
+                        help="Classifier-free guidance: probability of dropping action (0.1 = 10%)")
+    parser.add_argument("--action_aux_weight", type=float, default=0.0,
+                        help="Weight for action prediction auxiliary loss")
     parser.add_argument("--num_workers", type=int, default=0)
     # Logging
     parser.add_argument("--wandb", action="store_true")

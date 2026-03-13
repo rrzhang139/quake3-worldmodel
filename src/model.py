@@ -248,6 +248,8 @@ class Denoiser(nn.Module):
         depths: list = None,
         sigma_data: float = 0.5,
         sigma_offset_noise: float = 0.3,
+        cfg_drop_prob: float = 0.0,
+        action_aux_weight: float = 0.0,
     ):
         super().__init__()
         self.img_channels = img_channels
@@ -256,16 +258,35 @@ class Denoiser(nn.Module):
         self.num_context = num_context_frames
         self.sigma_data = sigma_data
         self.sigma_offset_noise = sigma_offset_noise
+        self.cfg_drop_prob = cfg_drop_prob
+        self.action_aux_weight = action_aux_weight
 
-        # Conditioning: Fourier(sigma) + action_emb -> MLP -> cond_channels
+        # Separate conditioning pathways for sigma and action
         fourier_dim = 64
         self.fourier = FourierFeatures(fourier_dim)
-        self.action_emb = nn.Embedding(num_actions, cond_channels)
-        self.cond_proj = nn.Sequential(
-            nn.Linear(fourier_dim + cond_channels, cond_channels),
+        self.sigma_proj = nn.Sequential(
+            nn.Linear(fourier_dim, cond_channels),
             nn.SiLU(),
             nn.Linear(cond_channels, cond_channels),
         )
+        self.action_emb = nn.Embedding(num_actions, cond_channels)
+        self.action_proj = nn.Sequential(
+            nn.Linear(cond_channels, cond_channels),
+            nn.SiLU(),
+            nn.Linear(cond_channels, cond_channels),
+        )
+        # Learned null embedding for CFG (replaces action when dropped)
+        self.null_action_emb = nn.Parameter(torch.zeros(cond_channels))
+
+        # Action prediction auxiliary head (predicts action from U-Net bottleneck)
+        if action_aux_weight > 0:
+            self.action_head = nn.Sequential(
+                nn.AdaptiveAvgPool2d(1),
+                nn.Flatten(),
+                nn.Linear(channels[-1] if channels else 128, num_actions),
+            )
+        else:
+            self.action_head = None
 
         # U-Net: input = noisy_target (3ch) + context (L*3 ch)
         in_ch = img_channels * (1 + num_context_frames)
@@ -286,21 +307,30 @@ class Denoiser(nn.Module):
         c_noise = sigma.log() / 4
         return c_skip, c_out, c_in, c_noise
 
+    def _build_cond(self, action: torch.Tensor, c_noise: torch.Tensor,
+                    drop_action: bool = False) -> torch.Tensor:
+        """Build conditioning vector with separate sigma/action pathways."""
+        sigma_cond = self.sigma_proj(self.fourier(c_noise))  # (B, cond_channels)
+        if drop_action:
+            act_cond = self.null_action_emb.expand(action.shape[0], -1)
+        else:
+            act_cond = self.action_proj(self.action_emb(action))  # (B, cond_channels)
+        return sigma_cond + act_cond
+
     def denoise(
         self,
         noisy_target: torch.Tensor,  # (B, C, H, W) noisy next frame
         context: torch.Tensor,        # (B, L, C, H, W) past frames
         action: torch.Tensor,         # (B,) action indices
         sigma: torch.Tensor,          # (B,) noise levels
+        drop_action: bool = False,
     ) -> torch.Tensor:
         """Single denoising step. Returns predicted clean frame."""
         B = noisy_target.shape[0]
         c_skip, c_out, c_in, c_noise = self._edm_precond(sigma)
 
-        # Build conditioning vector
-        sigma_emb = self.fourier(c_noise)                     # (B, fourier_dim)
-        act_emb = self.action_emb(action)                     # (B, cond_channels)
-        cond = self.cond_proj(torch.cat([sigma_emb, act_emb], dim=-1))  # (B, cond_channels)
+        # Build conditioning vector (separate pathways, additive)
+        cond = self._build_cond(action, c_noise, drop_action=drop_action)
 
         # Concatenate noisy target with context along channel dim
         context_flat = context.reshape(B, -1, *context.shape[3:])  # (B, L*C, H, W)
@@ -320,7 +350,7 @@ class Denoiser(nn.Module):
         action: torch.Tensor,    # (B,)
         noise_aug_sigma: float = 0.0,
     ) -> torch.Tensor:
-        """Compute EDM training loss."""
+        """Compute EDM training loss with CFG dropout and optional action aux loss."""
         B = target.shape[0]
         device = target.device
 
@@ -340,13 +370,39 @@ class Denoiser(nn.Module):
         if noise_aug_sigma > 0:
             context = context + torch.randn_like(context) * noise_aug_sigma
 
+        # CFG: randomly drop action conditioning
+        drop_action = False
+        if self.cfg_drop_prob > 0 and self.training:
+            drop_action = torch.rand(1).item() < self.cfg_drop_prob
+
         # Predict clean frame
-        denoised = self.denoise(noisy_target, context, action, sigma)
+        denoised = self.denoise(noisy_target, context, action, sigma,
+                                drop_action=drop_action)
 
         # EDM loss weighting
         weight = (sigma**2 + self.sigma_data**2) / (sigma * self.sigma_data) ** 2
         loss = weight[:, None, None, None] * (denoised - target) ** 2
-        return loss.mean()
+        diff_loss = loss.mean()
+
+        # Action prediction auxiliary loss
+        if self.action_head is not None and self.action_aux_weight > 0 and not drop_action:
+            # Get bottleneck features from U-Net (re-run encoder only)
+            c_skip, c_out, c_in, c_noise = self._edm_precond(sigma)
+            cond = self._build_cond(action, c_noise, drop_action=False)
+            context_flat = context.reshape(B, -1, *context.shape[3:])
+            x = torch.cat([c_in[:, None, None, None] * noisy_target, context_flat], dim=1)
+            x = self.unet.conv_in(x)
+            for i in range(len(self.unet.down_blocks)):
+                for block in self.unet.down_blocks[i]:
+                    x = block(x, cond)
+                if i < len(self.unet.down_blocks) - 1:
+                    x = self.unet.downsamplers[i](x)
+                    x = self.unet.down_ch_adapt[i](x)
+            action_logits = self.action_head(x)
+            aux_loss = F.cross_entropy(action_logits, action)
+            diff_loss = diff_loss + self.action_aux_weight * aux_loss
+
+        return diff_loss
 
     @torch.no_grad()
     def sample(
@@ -356,8 +412,9 @@ class Denoiser(nn.Module):
         num_steps: int = 3,
         sigma_min: float = 0.002,
         sigma_max: float = 5.0,
+        cfg_scale: float = 0.0,
     ) -> torch.Tensor:
-        """Generate next frame using Euler ODE solver."""
+        """Generate next frame using Euler ODE solver with optional CFG."""
         B = context.shape[0]
         device = context.device
 
@@ -375,7 +432,13 @@ class Denoiser(nn.Module):
 
         for i in range(num_steps):
             sigma = sigmas[i].expand(B)
-            denoised = self.denoise(x, context, action, sigma)
+            denoised_cond = self.denoise(x, context, action, sigma)
+            if cfg_scale > 0:
+                denoised_uncond = self.denoise(x, context, action, sigma,
+                                               drop_action=True)
+                denoised = denoised_uncond + (1 + cfg_scale) * (denoised_cond - denoised_uncond)
+            else:
+                denoised = denoised_cond
             # Euler step
             d = (x - denoised) / sigmas[i]
             x = x + (sigmas[i + 1] - sigmas[i]) * d
@@ -388,6 +451,8 @@ def make_denoiser(
     img_size: int = 84,
     num_context_frames: int = 4,
     model_size: str = "small",
+    cfg_drop_prob: float = 0.0,
+    action_aux_weight: float = 0.0,
 ) -> Denoiser:
     """Create a denoiser with predefined model sizes."""
     configs = {
@@ -401,6 +466,8 @@ def make_denoiser(
         num_actions=num_actions,
         img_size=img_size,
         num_context_frames=num_context_frames,
+        cfg_drop_prob=cfg_drop_prob,
+        action_aux_weight=action_aux_weight,
         **cfg,
     )
 

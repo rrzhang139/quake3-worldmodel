@@ -26,10 +26,10 @@ ACTION_NAMES = [
 ]
 
 
-def load_model(checkpoint_path, device, **kwargs):
+def load_model(checkpoint_path, device, cfg_drop_prob=0.0, action_aux_weight=0.0, **kwargs):
     ckpt = torch.load(checkpoint_path, map_location=device, weights_only=False)
-    model = make_denoiser(**kwargs).to(device)
-    model.load_state_dict(ckpt["model"])
+    model = make_denoiser(cfg_drop_prob=cfg_drop_prob, action_aux_weight=action_aux_weight, **kwargs).to(device)
+    model.load_state_dict(ckpt["model"], strict=False)
     model.eval()
     print(f"Loaded checkpoint: epoch={ckpt['epoch']+1}, loss={ckpt['loss']:.4f}")
     return model
@@ -50,6 +50,8 @@ def run_action_test(args):
         img_size=args.res,
         num_context_frames=args.num_context,
         model_size=args.model_size,
+        cfg_drop_prob=args.cfg_drop_prob,
+        action_aux_weight=args.action_aux_weight,
     )
 
     # Load a seed episode
@@ -74,7 +76,8 @@ def run_action_test(args):
     for act_idx in range(args.num_actions):
         action = torch.tensor([act_idx], device=device)
         with torch.no_grad():
-            pred = model.sample(context, action, num_steps=args.num_denoise_steps)
+            pred = model.sample(context, action, num_steps=args.num_denoise_steps,
+                            cfg_scale=args.cfg_scale)
         predictions[act_idx] = pred[0].cpu()
 
     # Save grid: context frame + 10 action predictions
@@ -127,7 +130,8 @@ def run_action_test(args):
         torch.manual_seed(seed)
         action = torch.tensor([test_action], device=device)
         with torch.no_grad():
-            pred = model.sample(context, action, num_steps=args.num_denoise_steps)
+            pred = model.sample(context, action, num_steps=args.num_denoise_steps,
+                                cfg_scale=args.cfg_scale)
         seed_preds.append(pred[0].cpu())
 
     for i, j in combinations(range(len(seed_preds)), 2):
@@ -173,6 +177,12 @@ def main():
     parser.add_argument("--model_size", type=str, default="small")
     parser.add_argument("--num_denoise_steps", type=int, default=3)
     parser.add_argument("--episode_idx", type=int, default=0)
+    parser.add_argument("--cfg_scale", type=float, default=0.0,
+                        help="Classifier-free guidance scale (0=disabled, 1-3 typical)")
+    parser.add_argument("--cfg_drop_prob", type=float, default=0.0,
+                        help="CFG drop prob used during training (for model loading)")
+    parser.add_argument("--action_aux_weight", type=float, default=0.0,
+                        help="Action aux weight used during training (for model loading)")
     parser.add_argument("--num_seeds", type=int, default=5,
                         help="Number of random seeds for same-action variance")
     args = parser.parse_args()
