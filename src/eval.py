@@ -15,17 +15,17 @@ from model import make_denoiser
 from episode import Episode
 
 
-def load_model(checkpoint_path, device, **kwargs):
+def load_model(checkpoint_path, device, cfg_drop_prob=0.0, action_aux_weight=0.0, **kwargs):
     """Load a trained denoiser from checkpoint."""
     ckpt = torch.load(checkpoint_path, map_location=device, weights_only=False)
-    model = make_denoiser(**kwargs).to(device)
-    model.load_state_dict(ckpt["model"])
+    model = make_denoiser(cfg_drop_prob=cfg_drop_prob, action_aux_weight=action_aux_weight, **kwargs).to(device)
+    model.load_state_dict(ckpt["model"], strict=False)
     model.eval()
     print(f"Loaded checkpoint: epoch={ckpt['epoch']+1}, loss={ckpt['loss']:.4f}")
     return model
 
 
-def autoregressive_rollout(model, seed_episode, start_t, num_steps, device, num_denoise=3):
+def autoregressive_rollout(model, seed_episode, start_t, num_steps, device, num_denoise=3, cfg_scale=0.0):
     """Generate frames autoregressively from a seed episode."""
     L = model.num_context
 
@@ -42,7 +42,7 @@ def autoregressive_rollout(model, seed_episode, start_t, num_steps, device, num_
         action = seed_episode.act[t].unsqueeze(0).to(device)
 
         with torch.no_grad():
-            pred = model.sample(context, action, num_steps=num_denoise)
+            pred = model.sample(context, action, num_steps=num_denoise, cfg_scale=cfg_scale)
 
         real_frame = seed_episode.obs[t + 1]
         real_frames.append(((real_frame + 1) / 2 * 255).clamp(0, 255).byte())
@@ -115,6 +115,8 @@ def evaluate(args):
         img_size=args.res,
         num_context_frames=args.num_context,
         model_size=args.model_size,
+        cfg_drop_prob=args.cfg_drop_prob,
+        action_aux_weight=args.action_aux_weight,
     )
 
     episode_dir = Path(args.data)
@@ -142,6 +144,7 @@ def evaluate(args):
         real_frames, pred_frames = autoregressive_rollout(
             model, ep, start_t, args.rollout_length, device,
             num_denoise=args.num_denoise_steps,
+            cfg_scale=args.cfg_scale,
         )
 
         # PSNR
@@ -206,6 +209,12 @@ def main():
     parser.add_argument("--rollout_length", type=int, default=32)
     parser.add_argument("--num_denoise_steps", type=int, default=3)
     parser.add_argument("--num_episodes", type=int, default=5)
+    parser.add_argument("--cfg_scale", type=float, default=0.0,
+                        help="Classifier-free guidance scale (0=disabled, 1-3 typical)")
+    parser.add_argument("--cfg_drop_prob", type=float, default=0.0,
+                        help="CFG drop prob used during training (for model loading)")
+    parser.add_argument("--action_aux_weight", type=float, default=0.0,
+                        help="Action aux weight used during training (for model loading)")
     parser.add_argument("--wandb", action="store_true")
     args = parser.parse_args()
     evaluate(args)
