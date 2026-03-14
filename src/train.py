@@ -56,6 +56,7 @@ def train(args):
         batch_size=args.batch_size,
         num_context_frames=args.num_context,
         num_workers=args.num_workers,
+        streaming=args.streaming,
     )
     print(f"Dataset: {len(dataloader.dataset)} samples, {len(dataloader)} batches/epoch")
 
@@ -215,6 +216,8 @@ def main():
     parser.add_argument("--action_aux_weight", type=float, default=0.0,
                         help="Weight for action prediction auxiliary loss")
     parser.add_argument("--num_workers", type=int, default=0)
+    parser.add_argument("--streaming", action="store_true",
+                        help="Stream episodes from disk instead of loading all into RAM")
     # Logging
     parser.add_argument("--wandb", action="store_true")
     parser.add_argument("--log_every", type=int, default=50)

@@ -19,41 +19,85 @@ class WorldModelDataset(Dataset):
     context_obs: (L, C, H, W)  -- past L frames
     action:      (1,) long      -- action taken after last context frame
     target_obs:  (C, H, W)      -- next frame to predict
+
+    Supports two modes:
+    - streaming=False (default for small datasets): loads all episodes into RAM
+    - streaming=True (for large datasets): loads episodes from disk on demand with LRU cache
     """
 
-    def __init__(self, episode_dir: str, num_context_frames: int = 4):
+    def __init__(self, episode_dir: str, num_context_frames: int = 4, streaming: bool = False, cache_size: int = 500):
         self.episode_dir = Path(episode_dir)
         self.num_context = num_context_frames
+        self.streaming = streaming
 
-        # Load all episodes into memory
-        self.episodes = []
         episode_files = sorted(self.episode_dir.glob("episode_*.pt"))
         if not episode_files:
             raise FileNotFoundError(f"No episodes found in {episode_dir}")
 
-        for f in episode_files:
-            ep = Episode.load(f)
-            if len(ep) >= self.num_context:
-                self.episodes.append(ep)
+        if streaming:
+            # Streaming mode: only scan episode lengths, don't load obs
+            self.episode_files = episode_files
+            self.episodes = None
+            self._cache = {}
+            self._cache_order = []
+            self._cache_size = cache_size
 
-        # Build index: (episode_idx, timestep) for valid samples
-        self.index = []
-        for ep_idx, ep in enumerate(self.episodes):
-            # timestep t means: context = obs[t-L:t], action = act[t-1], target = obs[t]
-            for t in range(self.num_context, len(ep) + 1):
-                # Skip if the target frame is after a terminal
-                if t > 0 and t <= len(ep) and ep.end[t - 1]:
-                    continue
-                self.index.append((ep_idx, t))
+            # Build index by scanning episode metadata (fast, low memory)
+            self.index = []
+            for ep_idx, f in enumerate(episode_files):
+                ep = Episode.load(f)
+                ep_len = len(ep)
+                if ep_len >= self.num_context:
+                    for t in range(self.num_context, ep_len + 1):
+                        if t > 0 and t <= ep_len and ep.end[t - 1]:
+                            continue
+                        self.index.append((ep_idx, t))
+                # Don't keep episode in memory
+                del ep
 
-        print(f"Loaded {len(self.episodes)} episodes, {len(self.index)} samples")
+            print(f"Indexed {len(episode_files)} episodes, {len(self.index)} samples (streaming mode, cache={cache_size})")
+        else:
+            # In-memory mode: load all episodes
+            self.episodes = []
+            for f in episode_files:
+                ep = Episode.load(f)
+                if len(ep) >= self.num_context:
+                    self.episodes.append(ep)
+
+            self.index = []
+            for ep_idx, ep in enumerate(self.episodes):
+                for t in range(self.num_context, len(ep) + 1):
+                    if t > 0 and t <= len(ep) and ep.end[t - 1]:
+                        continue
+                    self.index.append((ep_idx, t))
+
+            print(f"Loaded {len(self.episodes)} episodes, {len(self.index)} samples")
+
+    def _get_episode(self, ep_idx):
+        """Get episode, using LRU cache in streaming mode."""
+        if not self.streaming:
+            return self.episodes[ep_idx]
+
+        if ep_idx in self._cache:
+            return self._cache[ep_idx]
+
+        ep = Episode.load(self.episode_files[ep_idx])
+        self._cache[ep_idx] = ep
+        self._cache_order.append(ep_idx)
+
+        # Evict oldest if cache full
+        while len(self._cache_order) > self._cache_size:
+            old = self._cache_order.pop(0)
+            self._cache.pop(old, None)
+
+        return ep
 
     def __len__(self):
         return len(self.index)
 
     def __getitem__(self, idx):
         ep_idx, t = self.index[idx]
-        ep = self.episodes[ep_idx]
+        ep = self._get_episode(ep_idx)
 
         # Context: L frames before timestep t
         context = ep.obs[t - self.num_context : t]  # (L, C, H, W)
@@ -77,8 +121,9 @@ def make_dataloader(
     num_context_frames: int = 4,
     num_workers: int = 0,
     shuffle: bool = True,
+    streaming: bool = False,
 ) -> DataLoader:
-    dataset = WorldModelDataset(episode_dir, num_context_frames)
+    dataset = WorldModelDataset(episode_dir, num_context_frames, streaming=streaming)
     return DataLoader(
         dataset,
         batch_size=batch_size,
