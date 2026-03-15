@@ -51,12 +51,13 @@ def train(args):
     print(f"Device: {device}")
 
     # Data
+    data_mode = "streaming" if args.streaming else args.data_mode
     dataloader = make_dataloader(
         args.data,
         batch_size=args.batch_size,
         num_context_frames=args.num_context,
         num_workers=args.num_workers,
-        streaming=args.streaming,
+        mode=data_mode,
     )
     print(f"Dataset: {len(dataloader.dataset)} samples, {len(dataloader)} batches/epoch")
 
@@ -215,9 +216,14 @@ def main():
                         help="Classifier-free guidance: probability of dropping action (0.1 = 10%)")
     parser.add_argument("--action_aux_weight", type=float, default=0.0,
                         help="Weight for action prediction auxiliary loss")
-    parser.add_argument("--num_workers", type=int, default=0)
+    parser.add_argument("--num_workers", type=int, default=2)
+    parser.add_argument("--data_mode", type=str, default="ram",
+                        choices=["ram", "episodes", "streaming"],
+                        help="Data loading mode: 'ram' (flat uint8 tensors, fastest), "
+                             "'episodes' (legacy Episode objects), 'streaming' (disk IO, slow)")
+    # Keep --streaming for backward compat
     parser.add_argument("--streaming", action="store_true",
-                        help="Stream episodes from disk instead of loading all into RAM")
+                        help="[deprecated] Use --data_mode=streaming instead")
     # Logging
     parser.add_argument("--wandb", action="store_true")
     parser.add_argument("--log_every", type=int, default=50)
