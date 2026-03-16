@@ -110,7 +110,17 @@ class ScriptedPolicy:
         return np.random.randint(NUM_ACTIONS)
 
 
-def make_game(scenario: str = "deathmatch", res: int = 84, frame_skip: int = 4) -> vzd.DoomGame:
+SCREEN_RESOLUTIONS = {
+    "160x120": vzd.ScreenResolution.RES_160X120,
+    "320x240": vzd.ScreenResolution.RES_320X240,
+    "256x144": vzd.ScreenResolution.RES_256X144,
+    "256x160": vzd.ScreenResolution.RES_256X160,
+    "640x480": vzd.ScreenResolution.RES_640X480,
+}
+
+
+def make_game(scenario: str = "deathmatch", res: int = 84, frame_skip: int = 4,
+              screen_res: str = "160x120") -> vzd.DoomGame:
     game = vzd.DoomGame()
 
     # Scenario
@@ -118,7 +128,8 @@ def make_game(scenario: str = "deathmatch", res: int = 84, frame_skip: int = 4) 
     game.load_config(scenario_path)
 
     # Override screen settings
-    game.set_screen_resolution(vzd.ScreenResolution.RES_160X120)
+    vzd_res = SCREEN_RESOLUTIONS.get(screen_res, vzd.ScreenResolution.RES_160X120)
+    game.set_screen_resolution(vzd_res)
     game.set_screen_format(vzd.ScreenFormat.RGB24)
     game.set_window_visible(False)
     game.set_render_hud(False)
@@ -136,7 +147,9 @@ def make_game(scenario: str = "deathmatch", res: int = 84, frame_skip: int = 4) 
 
 
 def resize_frame(frame: np.ndarray, size: int) -> np.ndarray:
-    """Resize (H, W, C) frame to (size, size, C)."""
+    """Resize (H, W, C) frame. size=0 means keep native resolution."""
+    if size == 0:
+        return frame
     img = Image.fromarray(frame)
     img = img.resize((size, size), Image.BILINEAR)
     return np.array(img)
@@ -188,10 +201,10 @@ def collect_episode(game: vzd.DoomGame, res: int = 84, frame_skip: int = 4,
         rew_list.append(reward)
 
         if game.is_episode_finished():
-            # Terminal: create a black frame as final obs
+            # Terminal: create a black frame as final obs (match shape of previous frame)
             end_list.append(True)
             trunc_list.append(False)
-            obs_list.append(np.zeros((res, res, 3), dtype=np.uint8))
+            obs_list.append(np.zeros_like(obs_list[-1]))
         else:
             end_list.append(False)
             trunc_list.append(steps + 1 >= max_steps)
@@ -209,7 +222,11 @@ def main():
     parser.add_argument("--num_episodes", type=int, default=100)
     parser.add_argument("--output", type=str, default="data/episodes")
     parser.add_argument("--scenario", type=str, default="deathmatch")
-    parser.add_argument("--res", type=int, default=84)
+    parser.add_argument("--res", type=int, default=0,
+                        help="Resize to square NxN (0=native resolution)")
+    parser.add_argument("--screen_res", type=str, default="160x120",
+                        choices=list(SCREEN_RESOLUTIONS.keys()),
+                        help="ViZDoom render resolution")
     parser.add_argument("--frame_skip", type=int, default=4)
     parser.add_argument("--max_steps", type=int, default=500,
                         help="Max steps per episode (after frame skip)")
@@ -225,7 +242,7 @@ def main():
     print(f"Resolution: {args.res}x{args.res}, frame_skip: {args.frame_skip}")
     print(f"Output: {output_dir}")
 
-    game = make_game(args.scenario, args.res, args.frame_skip)
+    game = make_game(args.scenario, args.res, args.frame_skip, args.screen_res)
 
     total_frames = 0
     t0 = time.time()
