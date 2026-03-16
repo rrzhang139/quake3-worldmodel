@@ -248,6 +248,8 @@ class Denoiser(nn.Module):
         depths: list = None,
         sigma_data: float = 0.5,
         sigma_offset_noise: float = 0.3,
+        sigma_loc: float = -0.4,
+        sigma_scale: float = 1.2,
         cfg_drop_prob: float = 0.0,
         action_aux_weight: float = 0.0,
     ):
@@ -258,6 +260,8 @@ class Denoiser(nn.Module):
         self.num_context = num_context_frames
         self.sigma_data = sigma_data
         self.sigma_offset_noise = sigma_offset_noise
+        self.sigma_loc = sigma_loc
+        self.sigma_scale = sigma_scale
         self.cfg_drop_prob = cfg_drop_prob
         self.action_aux_weight = action_aux_weight
 
@@ -354,9 +358,9 @@ class Denoiser(nn.Module):
         B = target.shape[0]
         device = target.device
 
-        # Sample noise level from log-normal
-        sigma = torch.randn(B, device=device).exp() * 0.5  # mean=0, std=0.5 in log space
-        sigma = sigma.clamp(0.002, 80.0)
+        # Sample noise level from log-normal (DIAMOND recipe: loc=-0.4, scale=1.2)
+        sigma = (torch.randn(B, device=device) * self.sigma_scale + self.sigma_loc).exp()
+        sigma = sigma.clamp(0.002, 20.0)
 
         # Add noise to target
         noise = torch.randn_like(target)

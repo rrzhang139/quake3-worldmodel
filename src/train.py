@@ -73,8 +73,16 @@ def train(args):
     params = sum(p.numel() for p in model.parameters())
     print(f"Model: {args.model_size} ({params:,} params)")
 
-    # Optimizer
-    optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
+    # Optimizer (DIAMOND recipe: AdamW with weight decay)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
+
+    # LR warmup scheduler
+    if args.lr_warmup_steps > 0:
+        def lr_lambda(step):
+            return min(1.0, step / args.lr_warmup_steps)
+        scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
+    else:
+        scheduler = None
 
     # W&B
     wandb_run = None
@@ -122,9 +130,10 @@ def train(args):
 
             optimizer.zero_grad()
             loss.backward()
-            # Gradient clipping
-            nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+            nn.utils.clip_grad_norm_(model.parameters(), max_norm=args.max_grad_norm)
             optimizer.step()
+            if scheduler is not None:
+                scheduler.step()
 
             epoch_losses.append(loss.item())
             global_step += 1
@@ -210,6 +219,12 @@ def main():
     parser.add_argument("--epochs", type=int, default=100)
     parser.add_argument("--batch_size", type=int, default=32)
     parser.add_argument("--lr", type=float, default=1e-4)
+    parser.add_argument("--weight_decay", type=float, default=1e-2,
+                        help="AdamW weight decay (DIAMOND uses 1e-2)")
+    parser.add_argument("--lr_warmup_steps", type=int, default=100,
+                        help="Linear LR warmup steps (DIAMOND uses 100)")
+    parser.add_argument("--max_grad_norm", type=float, default=1.0,
+                        help="Max gradient norm for clipping")
     parser.add_argument("--noise_aug", type=float, default=0.0,
                         help="GameNGen context noise augmentation sigma")
     parser.add_argument("--cfg_drop_prob", type=float, default=0.0,
