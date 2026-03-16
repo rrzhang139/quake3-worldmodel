@@ -1,0 +1,3 @@
+  I'm building a world model for Quake III Arena. Using the DOOM engine for now to bootstrap some data.
+  Just got action conditioning working with classifier-free guidance (helps alot with action controllability). You can see the side by side comparison that its clearly responding to actions!           
+Right now it's a small 3M param diffusion U-Net, but visual quality is kinda buns so I plan to scale it to 12M next.

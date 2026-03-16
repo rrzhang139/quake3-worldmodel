@@ -10,6 +10,13 @@ sibling `personal-research/` repo (locally at `../personal-research/`, on pods a
 - If you discover a shared infra improvement (RunPod gotcha, SSH pattern, W&B convention), push it to `../personal-research/CLAUDE.md`
 - Project-specific infra (vizdoom install, EDM details) stays in THIS repo's CLAUDE.md
 
+## Autonomy & Infrastructure Permissions
+- **DO NOT ask for permission** on routine infrastructure operations: starting/stopping/creating pods, transferring data, uploading to W&B, collecting data, running evals. Just do it.
+- **DO ask** before: spending >$10 in a single action, deleting data/weights that aren't backed up, or sending tweets/public messages.
+- **API keys** are in `../personal-research/runpod/.env` — read that file for RunPod, W&B, GitHub, HF tokens. X/Twitter keys are in this repo's `.env`.
+- **RunPod API**: Use `https://api.runpod.io/graphql?api_key=<RUNPOD_API_KEY>` for pod management. If a pod can't start (host full), create a new one. Collect data on-pod rather than transferring large datasets.
+- **W&B mandate**: Always upload checkpoints to W&B before stopping a pod. Artifact naming: `quake3-wm-<description>`.
+
 # Quake III World Model — Project Instructions
 
 ## Overview
