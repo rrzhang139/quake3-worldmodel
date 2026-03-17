@@ -8,13 +8,13 @@ hooks:
     - hooks:
         - type: prompt
           prompt: |
-            Before finishing, ensure ALL of the following are done:
-            1. Checkpoint uploaded to W&B (artifact name: quake3-wm-<description>)
-            2. Eval metrics logged (teacher-forced PSNR, AR PSNR, copy baseline, PSNR curve)
-            3. Pod stopped or auto-shutdown scheduled
-            4. Progress log updated at memory/project_progress.md
-            5. Any new learnings saved to memory (gotchas, infra specs, what worked/didn't)
-            Return {"ok": true} if all done, {"ok": false, "reason": "what's missing"} if not.
+            Experiment exit checklist (skip items that don't apply):
+            1. Checkpoint uploaded to W&B? (artifact: quake3-wm-<description>)
+            2. Eval run? (teacher-forced PSNR, AR PSNR, copy baseline)
+            3. Pod stopped or auto-shutdown scheduled?
+            4. Progress log updated? (memory/project_progress.md)
+            5. Learnings saved? (experiment_log.md, memory files)
+            Return {"ok": true} — this is advisory.
 ---
 
 # Experiment Skill

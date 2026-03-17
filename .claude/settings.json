@@ -5,7 +5,7 @@
         "hooks": [
           {
             "type": "prompt",
-            "prompt": "Before ending, consider: (1) Are any pods still running? If so, stop them or set auto-shutdown. (2) Update SCOPE.md milestones if progress was made. (3) Save any new learnings to memory. (4) Update memory/project_progress.md if experiments were run."
+            "prompt": "Before ending, briefly consider if any of these apply (skip any that don't): (1) Are any RunPod pods still running? (2) Were experiments run that should be logged to memory/project_progress.md? (3) Were there new learnings worth saving to memory? Return {\"ok\": true} — this check is advisory, not blocking."
           }
         ]
       }

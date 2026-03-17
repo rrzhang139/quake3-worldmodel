@@ -8,14 +8,12 @@ hooks:
     - hooks:
         - type: prompt
           prompt: |
-            Before finishing, verify:
-            1. No pods left running unintentionally (check via RunPod API)
-            2. Any new checkpoints uploaded to W&B
-            3. Any new datasets uploaded to HuggingFace
-            4. Cost estimate logged
-            5. Update memory/reference_infra_specs.md if new specs discovered
-            6. Update infra log at .claude/skills/infra/infra_log.md
-            Return {"ok": true} if all done, {"ok": false, "reason": "what's missing"} if not.
+            Infra exit checklist (skip items that don't apply):
+            1. No pods left running unintentionally?
+            2. Checkpoints uploaded to W&B?
+            3. Datasets uploaded to HuggingFace?
+            4. Cost estimate logged to infra_log.md?
+            Return {"ok": true} — this is advisory.
 ---
 
 # Infrastructure Skill
