@@ -67,6 +67,36 @@ Episode:
 
 Saved as `.pt` files with uint8 obs on disk (saves 4x space). Converted to float [-1,1] on load.
 
+## Datasets
+
+All datasets stored on HuggingFace: `rzhang139/vizdoom-episodes`
+
+| Dataset | Resolution | Episodes | Frames | Size |
+|---------|-----------|----------|--------|------|
+| `episodes_160x120_5k` | 160x120 (native) | 5,000 | ~1M | ~19GB |
+| `episodes_84x84_10k` | 84x84 (resized) | 10,000 | ~2M | ~40GB |
+
+**Download on pod:**
+```bash
+pip install huggingface_hub
+huggingface-cli download rzhang139/vizdoom-episodes \
+    --repo-type dataset \
+    --include "episodes_160x120_5k/*" \
+    --local-dir data \
+    --token $HF_TOKEN
+```
+
+**Collect new data:**
+```bash
+# Native 160x120 (recommended — matches GameNGen resolution)
+python src/collect.py --num_episodes 5000 --output data/episodes_160x120 --max_steps 300 --policy mixed --res 0 --screen_res 160x120
+
+# 84x84 (legacy)
+python src/collect.py --num_episodes 10000 --output data/episodes_84x84 --max_steps 300 --policy mixed --res 84
+```
+
+**Always download from HF instead of re-collecting on pods.** Collection is CPU-bound and slow on pod CPUs.
+
 ## Model Sizes
 
 | Size   | Channels            | Params | Use case                |
