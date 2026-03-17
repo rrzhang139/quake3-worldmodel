@@ -160,36 +160,7 @@ def compute_fvd(real_videos, pred_videos, device):
 
 # ──────────────────── Action Accuracy (IDM) ────────────────────
 
-class InverseDynamicsModel(torch.nn.Module):
-    """Tiny CNN that predicts action from (frame_t, frame_t+1).
-
-    Architecture: concat two frames along channel dim (6ch) → 3 conv layers → global pool → FC → 10 actions.
-    ~50K params. Trains in <1 minute on CPU with 10K frame pairs.
-
-    Data flow at inference:
-      real frame_t (C,H,W) + generated frame_t+1 (C,H,W)
-        → concat along channel dim → (2C, H, W)
-        → conv 6→32 (3x3, stride 2) → ReLU → conv 32→64 (3x3, stride 2) → ReLU
-        → conv 64→64 (3x3, stride 2) → ReLU → adaptive avg pool to (1,1)
-        → flatten → linear 64→10 → softmax → predicted action
-    """
-
-    def __init__(self, num_actions=10, in_channels=6):
-        super().__init__()
-        self.net = torch.nn.Sequential(
-            torch.nn.Conv2d(in_channels, 32, 3, stride=2, padding=1),
-            torch.nn.ReLU(),
-            torch.nn.Conv2d(32, 64, 3, stride=2, padding=1),
-            torch.nn.ReLU(),
-            torch.nn.Conv2d(64, 64, 3, stride=2, padding=1),
-            torch.nn.ReLU(),
-            torch.nn.AdaptiveAvgPool2d(1),
-            torch.nn.Flatten(),
-            torch.nn.Linear(64, num_actions),
-        )
-
-    def forward(self, x):
-        return self.net(x)
+from train_idm import InverseDynamicsModel
 
 
 def train_idm(episodes, num_actions=10, device="cpu", num_samples=10000):
@@ -464,9 +435,16 @@ def evaluate(args):
     for f in episode_files[:min(50, len(episode_files))]:
         all_episodes.append(Episode.load(f))
 
-    # Train IDM on real data
-    print("Training inverse dynamics model (IDM) on real data...")
-    idm = train_idm(all_episodes, num_actions=args.num_actions, device=device)
+    # Load pretrained IDM if provided, otherwise skip action accuracy
+    idm = None
+    if args.idm_checkpoint and Path(args.idm_checkpoint).exists():
+        print(f"Loading pretrained IDM from {args.idm_checkpoint}")
+        idm_ckpt = torch.load(args.idm_checkpoint, map_location=device, weights_only=True)
+        idm = InverseDynamicsModel(idm_ckpt["num_actions"], idm_ckpt["in_channels"]).to(device)
+        idm.load_state_dict(idm_ckpt["model"])
+        idm.eval()
+    else:
+        print("No --idm_checkpoint provided. Skipping action accuracy metric.")
 
     print(f"\n{'='*70}")
     print(f"EVALUATION: {args.num_episodes} episodes, {rollout_len}-frame rollouts")
@@ -505,10 +483,11 @@ def evaluate(args):
                 lpips_by_step[i].append(compute_lpips(lpips_fn, r, p))
 
         # ── IDM action accuracy on this episode's AR rollout ──
-        gt_actions = [ep.act[start_t + i].item() for i in range(len(ar_pred) - 1)]
-        if gt_actions:
-            acc = compute_action_accuracy(idm, ar_real, ar_pred, gt_actions, device)
-            idm_accuracies.append(acc)
+        if idm is not None:
+            gt_actions = [ep.act[start_t + i].item() for i in range(len(ar_pred) - 1)]
+            if gt_actions:
+                acc = compute_action_accuracy(idm, ar_real, ar_pred, gt_actions, device)
+                idm_accuracies.append(acc)
 
         # ── 3. Copy baseline ──
         copy_psnrs = copy_baseline_psnr(ep, start_t, rollout_len)
@@ -678,6 +657,8 @@ def main():
     parser.add_argument("--cfg_scale", type=float, default=0.0)
     parser.add_argument("--cfg_drop_prob", type=float, default=0.0)
     parser.add_argument("--action_aux_weight", type=float, default=0.0)
+    parser.add_argument("--idm_checkpoint", type=str, default=None,
+                        help="Path to pretrained IDM weights (from train_idm.py). If not provided, trains on the fly.")
     parser.add_argument("--wandb", action="store_true")
     args = parser.parse_args()
     evaluate(args)
