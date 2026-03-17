@@ -66,6 +66,27 @@ def compute_lpips(lpips_fn, real: torch.Tensor, pred: torch.Tensor) -> float:
         return lpips_fn(r.to(dev), p.to(dev)).item()
 
 
+def compute_ssim(real: torch.Tensor, pred: torch.Tensor) -> float:
+    """SSIM between two (C, H, W) uint8 tensors. Returns scalar in [0, 1].
+
+    Data flow:
+      (C, H, W) uint8 → permute to (H, W, C) numpy → skimage computes SSIM
+      per-channel with 7x7 Gaussian window → average across channels → scalar.
+
+    SSIM = (2*mu_x*mu_y + C1)(2*sigma_xy + C2) / (mu_x^2 + mu_y^2 + C1)(sigma_x^2 + sigma_y^2 + C2)
+    where C1, C2 are small constants to avoid division by zero.
+
+    A score of 1.0 = identical. 0.9+ = very good. 0.7-0.9 = decent. <0.7 = poor.
+    """
+    from skimage.metrics import structural_similarity
+    # Convert from (C, H, W) uint8 tensor → (H, W, C) numpy float
+    r = real.permute(1, 2, 0).numpy().astype(np.float64)
+    p = pred.permute(1, 2, 0).numpy().astype(np.float64)
+    # channel_axis=2 tells skimage the last dim is color channels
+    # data_range=255 because our values are 0-255
+    return structural_similarity(r, p, channel_axis=2, data_range=255)
+
+
 def to_uint8(frame):
     """Convert [-1,1] float tensor to uint8."""
     return ((frame + 1) / 2 * 255).clamp(0, 255).byte()
@@ -73,45 +94,235 @@ def to_uint8(frame):
 
 # ──────────────────── FVD ────────────────────
 
+def _frechet_distance(mu1, sigma1, mu2, sigma2):
+    """Frechet distance between two multivariate Gaussians.
+
+    FD = ||mu1 - mu2||^2 + Tr(sigma1 + sigma2 - 2*sqrt(sigma1 @ sigma2))
+
+    Intuitively: how far apart are the "centers" of the two distributions,
+    plus how different are their shapes (covariances).
+    """
+    from scipy.linalg import sqrtm
+    diff = mu1 - mu2
+    covmean = sqrtm(sigma1 @ sigma2)
+    if np.iscomplexobj(covmean):
+        covmean = covmean.real
+    return float(diff @ diff + np.trace(sigma1 + sigma2 - 2 * covmean))
+
+
 def compute_fvd(real_videos, pred_videos, device):
     """Compute FVD between sets of real and predicted video clips.
 
-    real_videos, pred_videos: list of (T, C, H, W) uint8 tensors
-    Uses a simple I3D-based approach. Falls back to pixel-space FVD if
-    pytorch_fid_fvd is not available.
+    real_videos, pred_videos: list of (T, C, H, W) uint8 tensors.
+
+    Data flow:
+      Each video clip (T, C, H, W) uint8
+        → resize each frame to 224x224 (I3D input size)
+        → normalize to [0, 1]
+        → rearrange to (1, C, T, 224, 224) for I3D
+        → I3D extracts 400-dim feature vector
+        → collect features for all clips
+        → compute Frechet distance between real and pred feature distributions
+
+    Falls back to pixel-space features if cd-fvd / I3D not available.
+    Lower FVD = more similar temporal dynamics. GameNGen reports 114 (16-frame).
     """
+    # Try proper I3D-based FVD first
     try:
-        from pytorch_fid import fid_score
+        from cd_fvd import fvd as cd_fvd_compute
+        # cd-fvd expects (N, T, C, H, W) float tensors in [0, 1]
+        real_batch = torch.stack([v.float() / 255.0 for v in real_videos])  # (N, T, C, H, W)
+        pred_batch = torch.stack([v.float() / 255.0 for v in pred_videos])
+        fvd_val = cd_fvd_compute(real_batch, pred_batch)
+        return float(fvd_val)
     except ImportError:
         pass
 
-    # Simple pixel-space FVD: compute statistics on flattened frame features
+    # Fallback: pixel-space FVD (spatial pool → flatten → Frechet distance)
+    # Less meaningful than I3D but better than nothing
     def video_to_features(videos):
-        """Simple feature extraction: flatten and PCA-like reduction."""
         feats = []
         for vid in videos:
-            # vid: (T, C, H, W) uint8
             v = vid.float() / 255.0
-            # Pool each frame spatially, concat temporal
-            pooled = v.mean(dim=(2, 3))  # (T, C)
-            feats.append(pooled.flatten().numpy())
-        return np.stack(feats)
+            pooled = v.mean(dim=(2, 3))  # (T, C) — average each frame spatially
+            feats.append(pooled.flatten().numpy())  # (T*C,) — flatten temporal+channel
+        return np.stack(feats)  # (N, T*C)
 
     real_feats = video_to_features(real_videos)
     pred_feats = video_to_features(pred_videos)
 
-    # Frechet distance between two Gaussian distributions
     mu_r, mu_p = real_feats.mean(0), pred_feats.mean(0)
     sigma_r = np.cov(real_feats, rowvar=False) + np.eye(real_feats.shape[1]) * 1e-6
     sigma_p = np.cov(pred_feats, rowvar=False) + np.eye(pred_feats.shape[1]) * 1e-6
 
-    from scipy.linalg import sqrtm
-    diff = mu_r - mu_p
-    covmean = sqrtm(sigma_r @ sigma_p)
-    if np.iscomplexobj(covmean):
-        covmean = covmean.real
-    fvd = diff @ diff + np.trace(sigma_r + sigma_p - 2 * covmean)
-    return float(fvd)
+    return _frechet_distance(mu_r, sigma_r, mu_p, sigma_p)
+
+
+# ──────────────────── Action Accuracy (IDM) ────────────────────
+
+class InverseDynamicsModel(torch.nn.Module):
+    """Tiny CNN that predicts action from (frame_t, frame_t+1).
+
+    Architecture: concat two frames along channel dim (6ch) → 3 conv layers → global pool → FC → 10 actions.
+    ~50K params. Trains in <1 minute on CPU with 10K frame pairs.
+
+    Data flow at inference:
+      real frame_t (C,H,W) + generated frame_t+1 (C,H,W)
+        → concat along channel dim → (2C, H, W)
+        → conv 6→32 (3x3, stride 2) → ReLU → conv 32→64 (3x3, stride 2) → ReLU
+        → conv 64→64 (3x3, stride 2) → ReLU → adaptive avg pool to (1,1)
+        → flatten → linear 64→10 → softmax → predicted action
+    """
+
+    def __init__(self, num_actions=10, in_channels=6):
+        super().__init__()
+        self.net = torch.nn.Sequential(
+            torch.nn.Conv2d(in_channels, 32, 3, stride=2, padding=1),
+            torch.nn.ReLU(),
+            torch.nn.Conv2d(32, 64, 3, stride=2, padding=1),
+            torch.nn.ReLU(),
+            torch.nn.Conv2d(64, 64, 3, stride=2, padding=1),
+            torch.nn.ReLU(),
+            torch.nn.AdaptiveAvgPool2d(1),
+            torch.nn.Flatten(),
+            torch.nn.Linear(64, num_actions),
+        )
+
+    def forward(self, x):
+        return self.net(x)
+
+
+def train_idm(episodes, num_actions=10, device="cpu", num_samples=10000):
+    """Train an IDM on real episode data. Returns trained model.
+
+    Data flow:
+      For each training sample:
+        pick random episode → pick random timestep t
+        → frame_t = episode.obs[t] as uint8 → float [0,1]
+        → frame_t+1 = episode.obs[t+1] as uint8 → float [0,1]
+        → concat along channel dim → (6, H, W)
+        → label = episode.act[t] (which action was taken)
+      Train with cross-entropy loss for a few epochs.
+    """
+    idm = InverseDynamicsModel(num_actions).to(device)
+    optimizer = torch.optim.Adam(idm.parameters(), lr=1e-3)
+
+    # Collect training pairs from real episodes
+    pairs_x = []
+    pairs_y = []
+    for _ in range(num_samples):
+        ep = episodes[np.random.randint(len(episodes))]
+        t = np.random.randint(0, len(ep))
+        # obs is float [-1,1], convert to [0,1] for IDM
+        frame_t = (ep.obs[t] + 1) / 2      # (C, H, W) float [0,1]
+        frame_tp1 = (ep.obs[t + 1] + 1) / 2
+        pairs_x.append(torch.cat([frame_t, frame_tp1], dim=0))  # (2C, H, W)
+        pairs_y.append(ep.act[t])
+
+    X = torch.stack(pairs_x).to(device)  # (N, 2C, H, W)
+    Y = torch.stack(pairs_y).to(device)  # (N,)
+
+    # Train for a few epochs
+    idm.train()
+    bs = 256
+    for epoch in range(5):
+        perm = torch.randperm(len(X))
+        total_loss = 0
+        correct = 0
+        for i in range(0, len(X), bs):
+            batch_x = X[perm[i:i+bs]]
+            batch_y = Y[perm[i:i+bs]]
+            logits = idm(batch_x)
+            loss = torch.nn.functional.cross_entropy(logits, batch_y)
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
+            total_loss += loss.item() * len(batch_y)
+            correct += (logits.argmax(1) == batch_y).sum().item()
+        acc = correct / len(X)
+
+    print(f"  IDM trained: {acc:.1%} accuracy on real data ({len(X)} samples, {epoch+1} epochs)")
+    idm.eval()
+    return idm
+
+
+def compute_action_accuracy(idm, real_frames, pred_frames, actions, device="cpu"):
+    """Test IDM on generated frames. Returns accuracy.
+
+    Data flow:
+      For each timestep t:
+        real_frame_t (C,H,W) uint8 + pred_frame_t+1 (C,H,W) uint8
+        → convert to float [0,1] → concat → (2C, H, W)
+        → IDM predicts action → compare to ground truth action
+      Accuracy = fraction correctly predicted.
+
+    High accuracy (~80%+) = model produces visually correct action effects.
+    Low accuracy (~10%, random) = model ignores actions or produces wrong effects.
+    """
+    if len(real_frames) < 2:
+        return 0.0
+
+    correct = 0
+    total = 0
+    with torch.no_grad():
+        for t in range(len(pred_frames) - 1):
+            # Use real frame_t (context) + predicted frame_t+1
+            frame_t = real_frames[t].float().unsqueeze(0).to(device) / 255.0
+            frame_tp1 = pred_frames[t].float().unsqueeze(0).to(device) / 255.0
+            x = torch.cat([frame_t, frame_tp1], dim=1)  # (1, 2C, H, W)
+            logits = idm(x)
+            pred_action = logits.argmax(1).item()
+            if pred_action == actions[t]:
+                correct += 1
+            total += 1
+
+    return correct / total if total > 0 else 0.0
+
+
+# ──────────────────── World Consistency ────────────────────
+
+def compute_world_consistency(model, episode, device, num_denoise=3, cfg_scale=0.0, num_turns=8):
+    """Test spatial consistency: turn left N times, then right N times. Compare start vs end.
+
+    Data flow:
+      Start from real context (4 frames)
+        → execute "turn left" (action 4) for num_turns steps autoregressively
+        → then execute "turn right" (action 5) for num_turns steps
+        → compare final predicted frame to the starting frame (LPIPS + PSNR)
+
+    If the world is consistent, turning left then right should return to roughly
+    the same view. High PSNR / low LPIPS between start and end = consistent world.
+
+    Drift/inconsistency manifests as: the "return" view looks nothing like the start.
+    """
+    L = model.num_context
+    start_t = L + 10
+    if start_t + 1 > len(episode):
+        return None
+
+    context = episode.obs[start_t - L : start_t].unsqueeze(0).to(device)
+    start_frame = to_uint8(episode.obs[start_t - 1])  # last context frame
+
+    # Turn left for N steps
+    for _ in range(num_turns):
+        action = torch.tensor([4], device=device)  # turn_left
+        with torch.no_grad():
+            pred = model.sample(context, action, num_steps=num_denoise, cfg_scale=cfg_scale)
+        context = torch.cat([context[:, 1:], pred.unsqueeze(1)], dim=1)
+
+    # Turn right for N steps (should undo the left turns)
+    for _ in range(num_turns):
+        action = torch.tensor([5], device=device)  # turn_right
+        with torch.no_grad():
+            pred = model.sample(context, action, num_steps=num_denoise, cfg_scale=cfg_scale)
+        context = torch.cat([context[:, 1:], pred.unsqueeze(1)], dim=1)
+
+    end_frame = to_uint8(pred[0].cpu())
+
+    psnr = compute_psnr(start_frame, end_frame)
+    ssim = compute_ssim(start_frame, end_frame)
+
+    return {"psnr": psnr, "ssim": ssim}
 
 
 # ──────────────────── Rollout Functions ────────────────────
@@ -230,15 +441,32 @@ def evaluate(args):
 
     # Collect per-step metrics across all episodes
     rollout_len = args.rollout_length
-    psnr_by_step = [[] for _ in range(rollout_len)]  # psnr_by_step[i] = list of PSNR at step i
+    psnr_by_step = [[] for _ in range(rollout_len)]
+    ssim_by_step = [[] for _ in range(rollout_len)]
     lpips_by_step = [[] for _ in range(rollout_len)]
     copy_psnr_by_step = [[] for _ in range(rollout_len)]
     teacher_psnrs = []
+    teacher_ssims = []
     teacher_lpips_vals = []
 
     # For FVD
     real_video_clips = []
     pred_video_clips = []
+
+    # For IDM action accuracy
+    idm_accuracies = []
+
+    # For world consistency
+    consistency_results = []
+
+    # Load episodes for IDM training + consistency test
+    all_episodes = []
+    for f in episode_files[:min(50, len(episode_files))]:
+        all_episodes.append(Episode.load(f))
+
+    # Train IDM on real data
+    print("Training inverse dynamics model (IDM) on real data...")
+    idm = train_idm(all_episodes, num_actions=args.num_actions, device=device)
 
     print(f"\n{'='*70}")
     print(f"EVALUATION: {args.num_episodes} episodes, {rollout_len}-frame rollouts")
@@ -257,7 +485,9 @@ def evaluate(args):
             num_denoise=args.num_denoise_steps, cfg_scale=args.cfg_scale,
         )
         tf_psnrs = [compute_psnr(r, p) for r, p in zip(tf_real, tf_pred)]
+        tf_ssims = [compute_ssim(r, p) for r, p in zip(tf_real, tf_pred)]
         teacher_psnrs.extend(tf_psnrs)
+        teacher_ssims.extend(tf_ssims)
         if lpips_fn:
             tf_lps = [compute_lpips(lpips_fn, r, p) for r, p in zip(tf_real, tf_pred)]
             teacher_lpips_vals.extend(tf_lps)
@@ -270,8 +500,15 @@ def evaluate(args):
 
         for i, (r, p) in enumerate(zip(ar_real, ar_pred)):
             psnr_by_step[i].append(compute_psnr(r, p))
+            ssim_by_step[i].append(compute_ssim(r, p))
             if lpips_fn:
                 lpips_by_step[i].append(compute_lpips(lpips_fn, r, p))
+
+        # ── IDM action accuracy on this episode's AR rollout ──
+        gt_actions = [ep.act[start_t + i].item() for i in range(len(ar_pred) - 1)]
+        if gt_actions:
+            acc = compute_action_accuracy(idm, ar_real, ar_pred, gt_actions, device)
+            idm_accuracies.append(acc)
 
         # ── 3. Copy baseline ──
         copy_psnrs = copy_baseline_psnr(ep, start_t, rollout_len)
@@ -283,16 +520,25 @@ def evaluate(args):
             real_video_clips.append(torch.stack(ar_real))
             pred_video_clips.append(torch.stack(ar_pred))
 
+        # ── World consistency test on this episode ──
+        wc = compute_world_consistency(model, ep, device, num_denoise=args.num_denoise_steps, cfg_scale=args.cfg_scale)
+        if wc:
+            consistency_results.append(wc)
+
         # ── Print per-episode summary ──
         ar_avg = np.mean([compute_psnr(r, p) for r, p in zip(ar_real, ar_pred)])
-        tf_avg = np.mean(tf_psnrs)
+        tf_avg = np.mean(tf_psnrs[-rollout_len:])
+        tf_ssim_avg = np.mean(tf_ssims[-rollout_len:])
         cp_avg = np.mean(copy_psnrs[:len(ar_real)])
         ar_8 = np.mean([compute_psnr(r, p) for r, p in zip(ar_real[:8], ar_pred[:8])])
         print(f"Episode {ep_idx}:")
-        print(f"  Teacher-forced PSNR: {tf_avg:.2f} dB")
+        print(f"  Teacher-forced: PSNR={tf_avg:.2f} dB, SSIM={tf_ssim_avg:.3f}")
         print(f"  AR rollout PSNR:     {ar_avg:.2f} dB (8-frame: {ar_8:.2f})")
         print(f"  Copy baseline PSNR:  {cp_avg:.2f} dB")
-        print(f"  AR frame 1: {psnr_by_step[0][-1]:.1f} dB, frame {rollout_len}: {psnr_by_step[-1][-1]:.1f} dB")
+        if idm_accuracies:
+            print(f"  Action accuracy (IDM): {idm_accuracies[-1]:.1%}")
+        if wc:
+            print(f"  World consistency (turn L+R): PSNR={wc['psnr']:.1f}, SSIM={wc['ssim']:.3f}")
 
         # ── Save videos ──
         frames_to_video(ar_real, vid_dir / f"ep{ep_idx}_real.mp4")
@@ -306,6 +552,7 @@ def evaluate(args):
 
     # Teacher-forced
     print(f"\n  Teacher-forced (single-step) PSNR: {np.mean(teacher_psnrs):.2f} dB")
+    print(f"  Teacher-forced SSIM:               {np.mean(teacher_ssims):.4f}")
     if teacher_lpips_vals:
         print(f"  Teacher-forced LPIPS:              {np.mean(teacher_lpips_vals):.4f}")
 
@@ -348,15 +595,35 @@ def evaluate(args):
         fvd = None
         print(f"\n  FVD: not enough video clips (need >=2, got {len(real_video_clips)})")
 
+    # SSIM
+    all_ar_ssim = [s for step_list in ssim_by_step for s in step_list]
+    print(f"\n  AR SSIM ({rollout_len}-frame avg): {np.mean(all_ar_ssim):.4f}")
+    print(f"  Teacher-forced SSIM:            {np.mean(teacher_ssims):.4f}")
+
     # LPIPS
     if lpips_fn:
         all_ar_lpips = [p for step_list in lpips_by_step for p in step_list]
-        print(f"\n  AR LPIPS ({rollout_len}-frame avg): {np.mean(all_ar_lpips):.4f}")
+        print(f"  AR LPIPS ({rollout_len}-frame avg): {np.mean(all_ar_lpips):.4f}")
+
+    # Action accuracy (IDM)
+    if idm_accuracies:
+        print(f"\n  Action accuracy (IDM): {np.mean(idm_accuracies):.1%}")
+        print(f"    (10% = random, 80%+ = actions produce correct visual effects)")
+
+    # World consistency
+    if consistency_results:
+        wc_psnrs = [r["psnr"] for r in consistency_results]
+        wc_ssims = [r["ssim"] for r in consistency_results]
+        print(f"\n  World consistency (turn L×8, R×8):")
+        print(f"    Start→End PSNR: {np.mean(wc_psnrs):.1f} dB")
+        print(f"    Start→End SSIM: {np.mean(wc_ssims):.3f}")
+        print(f"    (higher = more spatially consistent world)")
 
     print(f"\n  Videos saved to {vid_dir}")
 
     # ──────────────────── Save metrics ────────────────────
     metrics = {
+        # PSNR
         "teacher_forced_psnr": float(np.mean(teacher_psnrs)),
         "ar_psnr_32frame": float(np.mean(all_ar_psnr)),
         "ar_psnr_8frame": float(np.mean(short_psnr)),
@@ -365,6 +632,10 @@ def evaluate(args):
         "delta_vs_copy_tf": float(delta_tf),
         "psnr_by_step": [float(np.mean(s)) if s else 0 for s in psnr_by_step],
         "copy_psnr_by_step": [float(np.mean(s)) if s else 0 for s in copy_psnr_by_step],
+        # SSIM
+        "teacher_forced_ssim": float(np.mean(teacher_ssims)),
+        "ar_ssim_32frame": float(np.mean(all_ar_ssim)),
+        "ssim_by_step": [float(np.mean(s)) if s else 0 for s in ssim_by_step],
     }
     if fvd is not None:
         metrics["fvd"] = fvd
@@ -372,6 +643,11 @@ def evaluate(args):
         metrics["teacher_forced_lpips"] = float(np.mean(teacher_lpips_vals))
     if lpips_fn:
         metrics["ar_lpips"] = float(np.mean(all_ar_lpips))
+    if idm_accuracies:
+        metrics["action_accuracy_idm"] = float(np.mean(idm_accuracies))
+    if consistency_results:
+        metrics["world_consistency_psnr"] = float(np.mean([r["psnr"] for r in consistency_results]))
+        metrics["world_consistency_ssim"] = float(np.mean([r["ssim"] for r in consistency_results]))
 
     with open(out_dir / "metrics.json", "w") as f:
         json.dump(metrics, f, indent=2)
