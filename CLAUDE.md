@@ -1,3 +1,18 @@
+## Communication Style
+
+**Show the execution flow, not abstractions.** When working on code or experiments:
+
+1. **After EVERY code edit**: Explain what changed, why, and how it connects to the full data flow. Trace the path: input data → preprocessing → model forward pass → loss → optimizer step → output. Don't say "updated the training loop" — say "changed line 358 in model.py where sigma is sampled: was `exp(randn)*0.5` (uniform-ish), now `exp(randn*1.2 - 0.4)` (DIAMOND's log-normal, peaks around sigma=0.67 which means most training focuses on medium noise levels where the model learns the most)."
+
+2. **Hyperparameter changes need intuition + example**: Don't just say "set weight_decay=1e-2". Say: "AdamW weight_decay=1e-2 means each step, weights shrink by 1%. A weight of 0.5 becomes 0.495. This prevents any single weight from growing too large, which regularizes the model — important when we have 20M params but only 1M training frames."
+
+3. **Show the linear sequential flow**: When describing architecture or training, walk through it step by step like a debugger:
+   - "Frame comes in as uint8 (120, 160, 3) → Episode.load() divides by 255, multiplies by 2, subtracts 1 → now float32 in [-1,1] → dataset returns context (4, 3, 120, 160) + target (3, 120, 160) + action (scalar int) → model.training_loss() samples sigma from log-normal → adds noise to target → concatenates noisy_target with context along channel dim → U-Net predicts clean target → EDM loss weights by sigma → backward → AdamW step"
+
+4. **Frequent status updates**: After each tool call, briefly say what happened and what's next. Don't batch 5 edits silently then summarize.
+
+5. **Don't skip details**: If there are 10 lines of code that matter, show all 10 and explain each. The user wants holistic understanding, not summaries.
+
 ## Shared Infrastructure
 This project is part of a multi-repo research setup. Shared GPU/SSH/RunPod infra lives in the
 sibling `personal-research/` repo (locally at `../personal-research/`, on pods at `/workspace/code/personal-research/`).
