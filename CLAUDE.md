@@ -112,6 +112,29 @@ python src/collect.py --num_episodes 10000 --output data/episodes_84x84 --max_st
 
 **Always download from HF instead of re-collecting on pods.** Collection is CPU-bound and slow on pod CPUs.
 
+## Artifact Storage Rules
+
+**NEVER store large files in git.** Use the right storage for each type:
+
+| Type | Where | Naming | Example |
+|------|-------|--------|---------|
+| Model checkpoints (.pt) | **W&B Artifacts** | `quake3-wm-<description>` | `quake3-wm-run8-160x120-4ep` |
+| Datasets (episodes) | **HuggingFace** | `rzhang139/vizdoom-episodes/<name>` | `episodes_160x120_5k` |
+| IDM weights | **W&B Artifacts** | `quake3-idm` | `quake3-idm` |
+| Eval videos | **W&B Media** | logged via `wandb.Video()` | attached to eval runs |
+| Tweet media (small GIFs <2MB) | **Git** (assets/tweets/) | OK in git, small files | `tweet1_media.gif` |
+
+**Git repo should stay small.** Only code, configs, markdown, and small images (<2MB) go in git. Everything else goes to W&B or HuggingFace.
+
+**Download checkpoint on pod:**
+```python
+import wandb, shutil
+wandb.login(key=os.environ["WANDB_API_KEY"])
+art = wandb.Api().artifact("rzhang139/quake3-worldmodel/quake3-wm-run8-160x120-4ep:latest")
+art.download("/workspace/ckpt")
+shutil.copy("/workspace/ckpt/best.pt", "best.pt")
+```
+
 ## Model Sizes
 
 | Size   | Channels            | Params | Use case                |
