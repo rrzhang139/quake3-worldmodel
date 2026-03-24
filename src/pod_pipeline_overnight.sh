@@ -29,16 +29,13 @@ echo "============================================"
 echo ""
 echo "=== [1/7] Installing deps ==="
 cd /workspace/quake3-worldmodel
-python3 -m venv .venv
+# Use --system-site-packages to inherit torch from the RunPod base image.
+# The runpod/pytorch image already has torch+CUDA pre-installed system-wide.
+# This avoids re-downloading ~2GB of torch wheels.
+# NOTE: If you're on a pod with driver < 550 (no cu124 support), you'll need to
+# create a plain venv and install: pip install torch --index-url .../whl/cu121
+python3 -m venv --system-site-packages .venv
 source .venv/bin/activate
-
-# Install torch FIRST with explicit CUDA 12.1 index.
-# CRITICAL: Do NOT let pip auto-resolve torch from diffusers/transformers deps —
-# it will pull the latest torch (cu130) which requires CUDA driver 530+ and
-# RunPod A40/3090 pods ship with driver 520 (CUDA 12.0). cu121 works on driver 520+.
-pip install --quiet --no-warn-script-location \
-    torch torchvision \
-    --index-url https://download.pytorch.org/whl/cu121
 pip install --quiet --no-warn-script-location \
     diffusers transformers accelerate \
     wandb huggingface_hub scikit-image \
