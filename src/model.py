@@ -453,6 +453,7 @@ class Denoiser(nn.Module):
 def make_denoiser(
     num_actions: int = 10,
     img_size: int = 84,
+    img_channels: int = 3,
     num_context_frames: int = 4,
     model_size: str = "small",
     cfg_drop_prob: float = 0.0,
@@ -469,6 +470,7 @@ def make_denoiser(
     return Denoiser(
         num_actions=num_actions,
         img_size=img_size,
+        img_channels=img_channels,
         num_context_frames=num_context_frames,
         cfg_drop_prob=cfg_drop_prob,
         action_aux_weight=action_aux_weight,
