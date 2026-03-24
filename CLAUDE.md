@@ -137,12 +137,18 @@ shutil.copy("/workspace/ckpt/best.pt", "best.pt")
 
 ## Model Sizes
 
-| Size   | Channels            | Params | Use case                |
-|--------|---------------------|--------|-------------------------|
-| tiny   | [32, 32, 64, 64]    | ~0.5M  | Smoke tests             |
-| small  | [64, 64, 64, 64]    | ~3M    | Baseline training       |
-| medium | [64, 128, 128, 128] | ~12M   | Production              |
-| large  | [128, 128, 256, 256]| ~35M   | If medium underfits     |
+| Size   | Channels            | Params | VRAM @ batch=128 (latent) | Right-size GPU          |
+|--------|---------------------|--------|---------------------------|-------------------------|
+| tiny   | [32, 32, 64, 64]    | ~0.5M  | ~0.5 GB                   | Any GPU (even free tier)|
+| small  | [64, 64, 64, 64]    | ~3M    | ~0.8 GB                   | RTX 3070 ($0.07/hr)     |
+| medium | [64, 128, 128, 128] | ~7.6M  | ~1.6 GB                   | RTX A4000 ($0.09/hr)    |
+| large  | [128, 128, 256, 256]| ~35M   | ~5–8 GB                   | RTX 3090 ($0.11/hr)     |
+
+**GPU selection rule**: estimate VRAM first, then pick cheapest GPU with 2x headroom.
+- VRAM ≈ params×4 bytes (weights) + params×8 bytes (Adam states) + batch activations
+- For latent models (4ch, 15×20): activations ≈ batch × 0.05 MB — negligible
+- Don't use A40/A100 unless model is >10GB VRAM; they cost 3–5x more than RTX 3090
+- Always use `cloudType: ALL` for overnight runs (avoids community preemption) — only upgrade to SECURE if ALL fails repeatedly
 
 ## Dependencies
 
