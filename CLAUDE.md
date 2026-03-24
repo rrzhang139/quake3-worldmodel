@@ -212,7 +212,7 @@ Generates: PSNR metrics, side-by-side image strips, comparison MP4 videos.
 ```bash
 # 1. Upload .env (scp DOES NOT WORK through RunPod SSH gateway)
 #    Write .env content via heredoc instead:
-ssh -tt -i ~/.ssh/runpod <SSH_ADDRESS> << 'SSHEOF'
+ssh -tt -i ~/.ssh/runpod <podHostId>@ssh.runpod.io << 'SSHEOF'
 cat > /workspace/.env << 'ENVEOF'
 HF_TOKEN=...
 WANDB_API_KEY=...
@@ -261,6 +261,15 @@ Since scp doesn't work through RunPod gateway, options:
 - `scp` / `sftp` don't work (`subsystem request failed on channel 0`)
 - Output is very noisy (MOTD, PTY control characters)
 - tmux doesn't inherit parent env vars — must `source .bashrc_pod` inside tmux
+- **CRITICAL: SSH address is `<podHostId>@ssh.runpod.io`** — NOT `<pod_id>@ssh.runpod.io`. Get it from:
+  ```bash
+  curl -s "https://api.runpod.io/graphql?api_key=$KEY" -H "Content-Type: application/json" \
+    -d '{"query": "{ pod(input: { podId: \"POD_ID\" }) { machine { podHostId } } }"}'
+  # Result: "podHostId": "cyzx60pwcdht7t-64411f5f" → ssh cyzx60pwcdht7t-64411f5f@ssh.runpod.io
+  ```
+- **tmux not always available**: `apt-get install tmux` requires `apt-get update` first; use `nohup ... &` as fallback
+- **Direct IP SSH (`213.x.x.x:port`) does NOT work** — always use the gateway `ssh.runpod.io`
+- **`dockerArgs` breaks SSH** — overrides container startup, preventing SSH daemon from running. Never use `dockerArgs` if you need SSH.
 
 ### EDM diffusion (not DDPM)
 - Critical for stable autoregressive generation (long rollouts)
