@@ -32,10 +32,26 @@ cd /workspace/quake3-worldmodel
 python3 -m venv .venv
 source .venv/bin/activate
 
+# Install torch FIRST with explicit CUDA 12.1 index.
+# CRITICAL: Do NOT let pip auto-resolve torch from diffusers/transformers deps —
+# it will pull the latest torch (cu130) which requires CUDA driver 530+ and
+# RunPod A40/3090 pods ship with driver 520 (CUDA 12.0). cu121 works on driver 520+.
+pip install --quiet --no-warn-script-location \
+    torch torchvision \
+    --index-url https://download.pytorch.org/whl/cu121
 pip install --quiet --no-warn-script-location \
     diffusers transformers accelerate \
     wandb huggingface_hub scikit-image \
     imageio imageio-ffmpeg
+# Verify CUDA is visible before going further
+python3 -c "
+import torch, sys
+print(f'Torch: {torch.__version__}, CUDA available: {torch.cuda.is_available()}')
+if not torch.cuda.is_available():
+    print('ERROR: CUDA not available — aborting to avoid CPU-only training')
+    sys.exit(1)
+print(f'GPU: {torch.cuda.get_device_name(0)}, VRAM: {torch.cuda.get_device_properties(0).total_memory/1e9:.1f}GB')
+"
 echo "Deps installed. Python: $(python --version), Torch: $(python -c 'import torch; print(torch.__version__)')"
 
 # Auth
