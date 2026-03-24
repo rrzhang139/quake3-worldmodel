@@ -42,53 +42,38 @@ echo "Deps installed. Python: $(python --version), Torch: $(python -c 'import to
 python3 -c "from huggingface_hub import login; login(token='${HF_TOKEN}')"
 python3 -c "import wandb; wandb.login(key='${WANDB_API_KEY}')"
 
-# ─── STAGE 2: DOWNLOAD EPISODES ──────────────────────────────────────────────
-EPISODES_DIR=/workspace/data/hf_episodes/episodes_160x120_5k
-EPISODE_COUNT=$(ls "$EPISODES_DIR"/episode_*.pt 2>/dev/null | wc -l || echo 0)
+# ─── STAGE 2: DOWNLOAD LATENTS DIRECTLY FROM HF (fast path) ─────────────────
+# Latents are pre-encoded and already on HF — download them directly.
+# This skips ~19GB episode download + ~40min GPU encoding.
+LATENT_DIR=/workspace/data/latents_160x120_5k
+LATENT_COUNT=$(ls "$LATENT_DIR"/episode_*.pt 2>/dev/null | wc -l || echo 0)
 echo ""
-echo "=== [2/7] Episodes: $EPISODE_COUNT already on disk ==="
+echo "=== [2/7] Latents: $LATENT_COUNT already on disk ==="
 
-if [ "$EPISODE_COUNT" -lt 4900 ]; then
-    echo "Downloading episodes_160x120_5k from HF..."
-    mkdir -p /workspace/data
+if [ "$LATENT_COUNT" -lt 4900 ]; then
+    echo "Downloading latents_160x120_5k from HF..."
+    mkdir -p "$LATENT_DIR"
     python3 - << 'PYEOF'
 from huggingface_hub import snapshot_download
 snapshot_download(
     repo_id="rzhang139/vizdoom-episodes",
     repo_type="dataset",
-    local_dir="/workspace/data/hf_episodes",
-    allow_patterns=["episodes_160x120_5k/*"],
+    local_dir="/workspace/data",
+    allow_patterns=["latents_160x120_5k/*"],
     ignore_patterns=["*.md", ".gitattributes"],
 )
 import glob
-count = len(glob.glob("/workspace/data/hf_episodes/episodes_160x120_5k/episode_*.pt"))
-print(f"Download complete: {count} episodes")
+count = len(glob.glob("/workspace/data/latents_160x120_5k/episode_*.pt"))
+print(f"Download complete: {count} latents")
 PYEOF
 else
-    echo "Skipping download — $EPISODE_COUNT episodes already present"
+    echo "Skipping download — $LATENT_COUNT latents already present"
 fi
 
-EPISODES_DIR=$(find /workspace/data -name "episode_000000.pt" -maxdepth 6 | head -1 | xargs dirname)
-echo "Episodes dir: $EPISODES_DIR"
-
-# ─── STAGE 3: ENCODE LATENTS ─────────────────────────────────────────────────
-LATENT_DIR=/workspace/data/latents_160x120_5k
+# ─── STAGE 3: ENCODE LATENTS (skip — already downloaded) ─────────────────────
 LATENT_COUNT=$(ls "$LATENT_DIR"/episode_*.pt 2>/dev/null | wc -l || echo 0)
 echo ""
-echo "=== [3/7] Latents: $LATENT_COUNT already encoded ==="
-
-if [ "$LATENT_COUNT" -lt 4900 ]; then
-    echo "Encoding episodes through SD VAE..."
-    mkdir -p "$LATENT_DIR"
-    export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
-    python3 src/encode_latents.py \
-        --input "$EPISODES_DIR" \
-        --output "$LATENT_DIR" \
-        --batch_size 64
-    echo "Encoding complete."
-else
-    echo "Skipping encode — $LATENT_COUNT latents already present"
-fi
+echo "=== [3/7] Latents: $LATENT_COUNT on disk (encoding skipped — using pre-encoded from HF) ==="
 
 # ─── STAGE 4: UPLOAD LATENTS TO HF ──────────────────────────────────────────
 echo ""
