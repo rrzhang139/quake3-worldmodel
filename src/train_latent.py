@@ -30,6 +30,12 @@ def train(args):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Device: {device}")
 
+    # bf16 mixed precision: ~1.5-2x faster on Ampere (A40, A100, RTX 3090+)
+    # bf16 has same exponent range as fp32 — no gradient underflow, no scaler needed
+    use_amp = device.type == "cuda" and args.bf16
+    amp_dtype = torch.bfloat16 if use_amp else torch.float32
+    print(f"Mixed precision: {'bf16' if use_amp else 'fp32'}")
+
     # Data — latent frames are (4, 15, 20) float32
     dataloader = make_latent_dataloader(
         args.data,
@@ -52,6 +58,11 @@ def train(args):
     ).to(device)
     params = sum(p.numel() for p in model.parameters())
     print(f"Model: {args.model_size} ({params:,} params), latent mode (4ch, 15x20)")
+
+    # torch.compile: ~20-30% additional speedup via kernel fusion (PyTorch 2.0+)
+    if args.compile and hasattr(torch, "compile"):
+        print("Compiling model with torch.compile (first step will be slow)...")
+        model = torch.compile(model)
 
     # Optimizer (DIAMOND recipe)
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
@@ -103,12 +114,13 @@ def train(args):
             target = batch["target"].to(device)     # (B, 4, 15, 20)
             action = batch["action"].to(device)     # (B,)
 
-            loss = model.training_loss(
-                context, target, action,
-                noise_aug_sigma=args.noise_aug,
-            )
-
             optimizer.zero_grad()
+            with torch.autocast(device_type=device.type, dtype=amp_dtype, enabled=use_amp):
+                loss = model.training_loss(
+                    context, target, action,
+                    noise_aug_sigma=args.noise_aug,
+                )
+
             loss.backward()
             nn.utils.clip_grad_norm_(model.parameters(), max_norm=args.max_grad_norm)
             optimizer.step()
@@ -186,6 +198,8 @@ def main():
     parser.add_argument("--save_every", type=int, default=5)
     parser.add_argument("--output", type=str, default="experiments/run_latent")
     parser.add_argument("--resume", type=str, default=None)
+    parser.add_argument("--bf16", action="store_true", help="Use bf16 mixed precision (Ampere+, ~1.5-2x speedup)")
+    parser.add_argument("--compile", action="store_true", help="torch.compile for extra ~20-30%% speedup")
     args = parser.parse_args()
     train(args)
 

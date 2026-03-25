@@ -98,16 +98,17 @@ else
     echo "Skipping — $LATENT_COUNT latents already encoded"
 fi
 
-# ─── STAGE 4: UPLOAD LATENTS TO HF ───────────────────────────────────────────
+# ─── STAGE 4: UPLOAD LATENTS TO HF (background — runs in parallel with training) ──
 echo ""
-echo "=== [4/8] Uploading latents to HuggingFace (latents_160x120_50k) ==="
-python3 - << 'PYEOF'
+echo "=== [4/8] Starting HF upload in background (won't block training) ==="
+python3 - << 'PYEOF' &
+HF_UPLOAD_PID=$!
 from huggingface_hub import HfApi, list_repo_files
-import glob
+import glob, sys
 
 api = HfApi()
 local = sorted(glob.glob("/workspace/data/latents_160x120_50k/episode_*.pt"))
-print(f"Local latents: {len(local)}")
+print(f"[HF Upload] Local latents: {len(local)}", flush=True)
 
 try:
     uploaded = sum(1 for f in list_repo_files("rzhang139/vizdoom-episodes", repo_type="dataset")
@@ -115,11 +116,11 @@ try:
 except Exception:
     uploaded = 0
 
-print(f"Already on HF: {uploaded}")
+print(f"[HF Upload] Already on HF: {uploaded}", flush=True)
 if uploaded >= len(local) - 100:
-    print("Already uploaded, skipping.")
+    print("[HF Upload] Already uploaded, skipping.", flush=True)
 else:
-    print(f"Uploading {len(local)} files to HF...")
+    print(f"[HF Upload] Uploading {len(local)} files...", flush=True)
     api.upload_folder(
         folder_path="/workspace/data/latents_160x120_50k",
         repo_id="rzhang139/vizdoom-episodes",
@@ -127,8 +128,9 @@ else:
         path_in_repo="latents_160x120_50k",
         allow_patterns=["episode_*.pt"],
     )
-    print("Upload complete.")
+    print("[HF Upload] Done.", flush=True)
 PYEOF
+echo "HF upload running in background (PID: $HF_UPLOAD_PID). Training starts immediately."
 
 # ─── STAGE 5: AUTO-TUNE BATCH SIZE ───────────────────────────────────────────
 echo ""
@@ -213,6 +215,8 @@ python3 -u src/train_latent.py \
     --cfg_drop_prob 0.15 \
     --action_aux_weight 0.1 \
     --max_grad_norm 1.0 \
+    --bf16 \
+    --compile \
     --wandb \
     --output "$OUT" \
     --log_every 500 \
@@ -220,6 +224,9 @@ python3 -u src/train_latent.py \
     2>&1 | tee /workspace/train_large.log
 
 echo "Training complete."
+
+# Wait for HF upload to finish (likely already done)
+wait $HF_UPLOAD_PID 2>/dev/null && echo "HF upload complete." || echo "HF upload may have finished already."
 
 # ─── STAGE 7: UPLOAD CHECKPOINT ──────────────────────────────────────────────
 echo ""
