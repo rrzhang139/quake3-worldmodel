@@ -60,9 +60,11 @@ def train(args):
     print(f"Model: {args.model_size} ({params:,} params), latent mode (4ch, 15x20)")
 
     # torch.compile: ~20-30% additional speedup via kernel fusion (PyTorch 2.0+)
+    # Known issue: bf16 + compile can cause dtype mismatch in some PyTorch versions.
+    # If training crashes on first step, rerun with --compile removed.
     if args.compile and hasattr(torch, "compile"):
-        print("Compiling model with torch.compile (first step will be slow)...")
-        model = torch.compile(model)
+        print("Compiling model with torch.compile (first step will be slow ~60s)...")
+        model = torch.compile(model, mode="reduce-overhead")
 
     # Optimizer (DIAMOND recipe)
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
